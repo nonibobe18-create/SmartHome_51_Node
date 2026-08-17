@@ -7,6 +7,7 @@
 #include "main.h"
 #include "oled.h"
 #include "uart.h"
+#include <string.h>
 
 /* DHT11 reading and node reporting interval. */
 #define NODE_REPORT_INTERVAL_MS 2000U
@@ -78,6 +79,44 @@ static void Node_SendEnvironmentPacket(uchar temperature, uchar humidity)
 }
 
 /**
+ * @brief 处理来自STM32网关下发的一条命令
+ * @param None
+ * @retval None
+ */
+static void App_ProcessGatewayCommand(void)
+{
+	if(UART_RxFlag == 0)
+	{
+		return;
+	}
+	/*
+	 * UART_RxPacket已经剔除 '@'、'\r'、'\n'
+	 * 合法命令格式：G1,ALARM=1 和 G1,ALARM=0
+	 */
+	if(strcmp(UART_RxPacket,"G1,ALARM=1") == 0)
+	{
+		/*
+		 * 51开发板LED为低电平点亮
+		 * LED1 = 0 打开LED
+		 */
+		LED1 = 0;
+		OLED_ShowString(0,6,(u8 *)"Cmd:ALARM ON   ",16);
+  }
+	else if(strcmp(UART_RxPacket,"G1,ALARM=0") == 0)
+	{
+		/* LED1 = 1 关闭LED */
+		LED1 = 1;
+		OLED_ShowString(0,6,(u8 *)"Cmd:ALARM OFF  ",16);
+  }
+	else
+	{
+		OLED_ShowString(0,6,(u8 *)"Cmd:INVALID    ",16);
+  }
+	/* 允许串口中断接收下一条命令 */
+	UART_RxFlag = 0;
+}
+
+/**
  * @brief 51 remote-node application entry point.
  * @param None
  * @retval None
@@ -92,8 +131,6 @@ void main(void)
     DHT11_Init();
     UART_Init();
 
-    /* The current node only sends data and does not receive commands yet. */
-    ES = 0;
 
     App_ShowStaticText();
 
@@ -110,6 +147,10 @@ void main(void)
         {
             App_ReportError(status);
         }
+				
+				/* 处理来自STM32网关下发的命令 */
+				App_ProcessGatewayCommand();
+
 
         Delay_xms(NODE_REPORT_INTERVAL_MS);
     }
