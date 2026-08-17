@@ -1,0 +1,9 @@
+*.lst
+*.obj
+*.hex
+*.lnp
+*.M51
+*.plg
+*.uvopt
+*.uvgui*
+*.bak
