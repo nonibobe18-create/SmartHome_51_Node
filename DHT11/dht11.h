@@ -10,6 +10,8 @@
 #define DHT11_ERR_BIT_FALL       5U
 #define DHT11_ERR_CHECKSUM       6U
 
+
+void DHT11_Init(void);
 uchar DHT11_Start(void);
 uchar DHT11_Read(unsigned char *humi,unsigned char *temp);
 
