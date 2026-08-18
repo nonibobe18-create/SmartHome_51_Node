@@ -13,7 +13,54 @@
 #define NODE_REPORT_INTERVAL_MS 2000U
 
 /* UART packet buffer sent to the STM32 gateway. */
-static char NodeTxBuffer[32];
+static char NodeTxBuffer[24];
+
+/**
+ * @brief 为协议载荷计算XOR异或校验和
+ * @param text 去除帧头、帧尾标记之后的协议有效载荷数据字符串
+ * @retval 返回计算得到的XOR校验字节
+ */
+static uchar Protocol_CalculateChecksum(const char *text)
+{
+	uchar checksum;                //保存XOR校验和结果
+	uchar index;                   //数组遍历索引
+	
+	checksum = 0;
+	index = 0;
+	
+	// 遍历字符串，直到遇到字符串结束符'\0'
+	while(text[index] != '\0')
+	{
+		// 将字符强制转为无符号字节，逐字节做(异或)累积运算
+		checksum ^= (uchar)text[index];
+		index ++;
+  }
+	
+	return checksum;               // 返回最终XOR校验和
+}
+
+/**
+ * @brief 对载荷做XOR校验，并按照协议帧格式发送出去
+ * @param None
+ * @retval None
+ */
+static void Protocol_SendPayloadWithChecksum(void)
+{
+    uchar checksum;
+
+    // 对 NodeTxBuffer 里面存放的原始有效载荷计算XOR校验和
+    checksum = Protocol_CalculateChecksum(NodeTxBuffer);
+
+    Send_UART_Byte('@');                 // 发送帧起始标记 @
+    Send_UART_Str((uchar *)NodeTxBuffer);// 发送原始载荷字符串
+
+    // 在缓冲区拼接校验字段与帧结束符 ,C=xx\r\n
+    sprintf(NodeTxBuffer,
+            ",C=%u\r\n",
+            (uint)checksum);
+
+    Send_UART_Str((uchar *)NodeTxBuffer);// 发送校验字段 + 帧结束 \r\n
+}
 
 /**
  * @brief Display fixed OLED labels.
@@ -54,71 +101,105 @@ static void App_ShowData(uchar temperature, uchar humidity)
  */
 static void App_ReportError(uchar status)
 {
-    OLED_ShowString(64, 4, (u8 *)"ERROR ", 16);
-    OLED_ShowString(0, 6, (u8 *)"Code:", 16);
-    OLED_ShowNum(48, 6, status, 2, 16);
+	OLED_ShowString(64, 4, (u8 *)"ERROR ", 16);
+	OLED_ShowString(0, 6, (u8 *)"Code:", 16);
+	OLED_ShowNum(48, 6, status, 2, 16);
+	
+	sprintf(NodeTxBuffer,"N1,ERROR=%u",(uint)status);
 
-    sprintf(NodeTxBuffer, "@N1,ERROR=%u\r\n", (uint)status);
-    Send_UART_Str((uchar *)NodeTxBuffer);
+  Protocol_SendPayloadWithChecksum();
 }
 
 /**
- * @brief Send valid environment data to the STM32 gateway.
- * @param temperature Temperature in degrees Celsius.
- * @param humidity Relative humidity in percent.
- * @retval None
+ * @brief 发送带XOR校验的环境温湿度数据包
+ * @param temperature 温度，单位：摄氏度
+ * @param humidity    相对湿度，单位：%RH
+ * @retval 无
  */
 static void Node_SendEnvironmentPacket(uchar temperature, uchar humidity)
 {
+    // 将温湿度格式化写入发送缓冲区，仅填充业务载荷，不含帧头、校验、结尾
     sprintf(NodeTxBuffer,
-            "@N1,T=%u,H=%u\r\n",
+            "N1,T=%u,H=%u",
             (uint)temperature,
             (uint)humidity);
 
-    Send_UART_Str((uchar *)NodeTxBuffer);
+    // 调用通用协议函数：自动计算XOR校验、添加@帧头、追加,C=xx\r\n并完成串口发送
+    Protocol_SendPayloadWithChecksum();
 }
 
 /**
- * @brief 处理来自STM32网关下发的一条命令
+ * @brief 解析处理来自STM32网关下发的报警控制命令
  * @param None
  * @retval None
  */
 static void App_ProcessGatewayCommand(void)
 {
-	if(UART_RxFlag == 0)
-	{
-		return;
-	}
-	/*
-	 * UART_RxPacket已经剔除 '@'、'\r'、'\n'
-	 * 合法命令格式：G1,ALARM=1 和 G1,ALARM=0
-	 */
-	if(strcmp(UART_RxPacket,"G1,ALARM=1") == 0)
-	{
-		/*
-		 * 51开发板LED为低电平点亮
-		 * LED1 = 0 打开LED
-		 */
-		LED1 = 0;
-		/** @brief Turn on the buzzer when the alarm is active. */
-		BEEP = 0;
-		OLED_ShowString(0,6,(u8 *)"Cmd:ALARM ON   ",16);
-  }
-	else if(strcmp(UART_RxPacket,"G1,ALARM=0") == 0)
-	{
-		/* LED1 = 1 关闭LED */
-		LED1 = 1;
-	  /** @brief Turn off the buzzer when the alarm is cleared. */
-    BEEP = 1;
-		OLED_ShowString(0,6,(u8 *)"Cmd:ALARM OFF  ",16);
-  }
-	else
-	{
-		OLED_ShowString(0,6,(u8 *)"Cmd:INVALID    ",16);
-  }
-	/* 允许串口中断接收下一条命令 */
-	UART_RxFlag = 0;
+    unsigned int commandValue;   // 解析得到ALARM命令值 0/1
+    unsigned int receivedChecksum; // 报文中收到的校验码
+    uchar expectedChecksum;      // 本地计算出来的预期XOR校验和
+    int parseResult;             // sscanf解析返回成功字段个数
+
+    // 没有收到完整一帧，直接返回
+    if (UART_RxFlag == 0)
+    {
+        return;
+    }
+
+    /*
+     * UART_RxPacket：已经剥离帧头@、帧结束\r\n，报文样例："G1,ALARM=1,C=86"
+     * sscanf解析出ALARM数值 和 C后面收到的校验码
+     */
+    parseResult = sscanf(UART_RxPacket,
+                         "G1,ALARM=%u,C=%u",
+                         &commandValue,
+                         &receivedChecksum);
+
+    // 解析字段不足2个 / 命令值不是0或1 / 收到校验超过1字节范围 → 非法报文
+    if ((parseResult != 2) ||
+        (commandValue > 1U) ||
+        (receivedChecksum > 255U))
+    {
+        OLED_ShowString(0, 6, (u8 *)"Cmd:INVALID    ", 16);
+    }
+    else if (commandValue == 1U)
+    {
+        // 本地对原始载荷 "G1,ALARM=1" 计算XOR校验
+        expectedChecksum = Protocol_CalculateChecksum("G1,ALARM=1");
+
+        // 校验比对成功，执行报警开启
+        if (receivedChecksum == expectedChecksum)
+        {
+            LED1 = 0;
+            BEEP = 0;
+            OLED_ShowString(0, 6, (u8 *)"Cmd:ALARM ON   ", 16);
+        }
+        else
+        {
+            OLED_ShowString(0, 6, (u8 *)"Cmd:INVALID    ", 16);
+        }
+    }
+    else
+    {
+        // commandValue == 0，计算载荷"G1,ALARM=0"预期校验
+        expectedChecksum = Protocol_CalculateChecksum("G1,ALARM=0");
+
+        // 校验比对成功，关闭报警
+        if (receivedChecksum == expectedChecksum)
+        {
+            LED1 = 1;
+            BEEP = 1;
+            OLED_ShowString(0, 6, (u8 *)"Cmd:ALARM OFF  ", 16);
+        }
+        else
+        {
+            OLED_ShowString(0, 6, (u8 *)"Cmd:INVALID    ", 16);
+        }
+    }
+
+    UART_RxFlag = 0; // 清除接收完成标志，等待下一帧报文
 }
+
 
 /**
  * @brief 51 remote-node application entry point.
