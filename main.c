@@ -100,12 +100,16 @@ static void App_ProcessGatewayCommand(void)
 		 * LED1 = 0 ´ò¿ªLED
 		 */
 		LED1 = 0;
+		/** @brief Turn on the buzzer when the alarm is active. */
+		BEEP = 0;
 		OLED_ShowString(0,6,(u8 *)"Cmd:ALARM ON   ",16);
   }
 	else if(strcmp(UART_RxPacket,"G1,ALARM=0") == 0)
 	{
 		/* LED1 = 1 ¹Ø±ÕLED */
 		LED1 = 1;
+	  /** @brief Turn off the buzzer when the alarm is cleared. */
+    BEEP = 1;
 		OLED_ShowString(0,6,(u8 *)"Cmd:ALARM OFF  ",16);
   }
 	else
