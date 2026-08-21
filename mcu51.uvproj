@@ -299,7 +299,7 @@
               <MiscControls></MiscControls>
               <Define></Define>
               <Undefine></Undefine>
-              <IncludePath>.\Delay;.\Uart;.\IIC;.\OLED;.\DHT11</IncludePath>
+              <IncludePath>.\Delay;.\Uart;.\IIC;.\OLED;.\DHT11;.\Stepper</IncludePath>
             </VariousControls>
           </C51>
           <Ax51>
@@ -385,6 +385,11 @@
               <FileName>dht11.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\DHT11\dht11.c</FilePath>
+            </File>
+            <File>
+              <FileName>stepper.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\Stepper\stepper.c</FilePath>
             </File>
           </Files>
         </Group>

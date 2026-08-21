@@ -8,12 +8,21 @@
 #include "oled.h"
 #include "uart.h"
 #include <string.h>
+#include "stepper.h"
 
 /* DHT11 reading and node reporting interval. */
 #define NODE_REPORT_INTERVAL_MS 2000U
 
 /* UART packet buffer sent to the STM32 gateway. */
 static char NodeTxBuffer[24];
+
+/*
+ * @brief Number of half steps used for one curtain movement.
+ * @note 512 half steps is approximately one revolution for 28BYJ?48.
+ * @note 28BYJ-48半步驱动模式，512个半步对应输出轴旋转完整1圈
+ * @note 该宏定义窗帘执行一次开合动作的步进电机半步数
+ */
+#define CURTAIN_TRAVEL_STEPS 512U
 
 /**
  * @brief 为协议载荷计算XOR异或校验和
@@ -129,75 +138,139 @@ static void Node_SendEnvironmentPacket(uchar temperature, uchar humidity)
 }
 
 /**
- * @brief 解析处理来自STM32网关下发的报警控制命令
+ * @brief Process validated alarm and curtain commands from the STM32 gateway.
  * @param None
  * @retval None
+ * @note 处理来自STM32网关的窗帘、报警器串口指令
+ * @note 通过strcmp完整比对接收缓冲区与拼装后的标准命令报文实现校验
  */
 static void App_ProcessGatewayCommand(void)
 {
-    unsigned int commandValue;   // 解析得到ALARM命令值 0/1
-    unsigned int receivedChecksum; // 报文中收到的校验码
-    uchar expectedChecksum;      // 本地计算出来的预期XOR校验和
-    int parseResult;             // sscanf解析返回成功字段个数
+    uchar expectedChecksum;   // 存储本地计算得到的预期校验和
 
-    // 没有收到完整一帧，直接返回
+    // 没有收到串口数据包，直接退出函数
     if (UART_RxFlag == 0)
     {
         return;
     }
 
     /*
-     * UART_RxPacket：已经剥离帧头@、帧结束\r\n，报文样例："G1,ALARM=1,C=86"
-     * sscanf解析出ALARM数值 和 C后面收到的校验码
+     * @brief Validate and execute the curtain OPEN command.
+     * @param None
+     * @retval None
+     * @note 窗帘打开指令：G1,CURTAIN=OPEN,C=校验和
      */
-    parseResult = sscanf(UART_RxPacket,
-                         "G1,ALARM=%u,C=%u",
-                         &commandValue,
-                         &receivedChecksum);
+    // 计算"G1,CURTAIN=OPEN"报文对应的校验和
+    expectedChecksum =
+        Protocol_CalculateChecksum("G1,CURTAIN=OPEN");
 
-    // 解析字段不足2个 / 命令值不是0或1 / 收到校验超过1字节范围 → 非法报文
-    if ((parseResult != 2) ||
-        (commandValue > 1U) ||
-        (receivedChecksum > 255U))
-    {
-        OLED_ShowString(0, 6, (u8 *)"Cmd:INVALID    ", 16);
-    }
-    else if (commandValue == 1U)
-    {
-        // 本地对原始载荷 "G1,ALARM=1" 计算XOR校验
-        expectedChecksum = Protocol_CalculateChecksum("G1,ALARM=1");
+    // 将命令+校验和拼装完整报文存入NodeTxBuffer缓冲区
+    sprintf(NodeTxBuffer,
+            "G1,CURTAIN=OPEN,C=%u",
+            (uint)expectedChecksum);
 
-        // 校验比对成功，执行报警开启
-        if (receivedChecksum == expectedChecksum)
-        {
-            LED1 = 0;
-            BEEP = 0;
-            OLED_ShowString(0, 6, (u8 *)"Cmd:ALARM ON   ", 16);
-        }
-        else
-        {
-            OLED_ShowString(0, 6, (u8 *)"Cmd:INVALID    ", 16);
-        }
-    }
-    else
+    // 将收到的串口报文和拼装好的标准报文完整比对
+    if (strcmp(UART_RxPacket, NodeTxBuffer) == 0)
     {
-        // commandValue == 0，计算载荷"G1,ALARM=0"预期校验
-        expectedChecksum = Protocol_CalculateChecksum("G1,ALARM=0");
+        // 电机正转，执行窗帘打开动作
+        Stepper_RotateSteps(CURTAIN_TRAVEL_STEPS,
+                            STEPPER_DIRECTION_FORWARD);
+        Stepper_Stop();         // 动作完成，关闭步进电机线圈，释放锁止力矩
 
-        // 校验比对成功，关闭报警
-        if (receivedChecksum == expectedChecksum)
-        {
-            LED1 = 1;
-            BEEP = 1;
-            OLED_ShowString(0, 6, (u8 *)"Cmd:ALARM OFF  ", 16);
-        }
-        else
-        {
-            OLED_ShowString(0, 6, (u8 *)"Cmd:INVALID    ", 16);
-        }
+        OLED_ShowString(0, 6,
+                        (u8 *)"Cmd:CURTAIN OPEN",
+                        16); // OLED屏幕显示：窗帘打开命令
+
+        UART_RxFlag = 0;        // 清除串口接收标志位
+        return;                 // 命令处理完毕，退出
     }
 
-    UART_RxFlag = 0; // 清除接收完成标志，等待下一帧报文
+    /*
+     * @brief Validate and execute the curtain CLOSE command.
+     * @param None
+     * @retval None
+     * @note 窗帘关闭指令：G1,CURTAIN=CLOSE,C=校验和
+     */
+    expectedChecksum =
+        Protocol_CalculateChecksum("G1,CURTAIN=CLOSE");
+
+    sprintf(NodeTxBuffer,
+            "G1,CURTAIN=CLOSE,C=%u",
+            (uint)expectedChecksum);
+
+    if (strcmp(UART_RxPacket, NodeTxBuffer) == 0)
+    {
+        // 电机反转，执行窗帘关闭动作
+        Stepper_RotateSteps(CURTAIN_TRAVEL_STEPS,
+                            STEPPER_DIRECTION_REVERSE);
+        Stepper_Stop();
+
+        OLED_ShowString(0, 6,
+                        (u8 *)"Cmd:CURTAIN CLS ",
+                        16); // OLED屏幕显示：窗帘关闭命令
+
+        UART_RxFlag = 0;
+        return;
+    }
+
+    /*
+     * @brief Validate and execute the alarm ON command.
+     * @param None
+     * @retval None
+     * @note 报警器开启指令：G1,ALARM=1,C=校验和；LED低电平点亮，蜂鸣器低电平鸣响
+     */
+    expectedChecksum =
+        Protocol_CalculateChecksum("G1,ALARM=1");
+
+    sprintf(NodeTxBuffer,
+            "G1,ALARM=1,C=%u",
+            (uint)expectedChecksum);
+
+    if (strcmp(UART_RxPacket, NodeTxBuffer) == 0)
+    {
+        LED1 = 0;   // 报警LED点亮
+        BEEP = 0;   // 蜂鸣器开启报警
+
+        OLED_ShowString(0, 6,
+                        (u8 *)"Cmd:ALARM ON   ",
+                        16); // OLED屏幕显示：报警开启
+
+        UART_RxFlag = 0;
+        return;
+    }
+
+    /*
+     * @brief Validate and execute the alarm OFF command.
+     * @param None
+     * @retval None
+     * @note 报警器关闭指令：G1,ALARM=0,C=校验和；LED高电平熄灭，蜂鸣器高电平关闭
+     */
+    expectedChecksum =
+        Protocol_CalculateChecksum("G1,ALARM=0");
+
+    sprintf(NodeTxBuffer,
+            "G1,ALARM=0,C=%u",
+            (uint)expectedChecksum);
+
+    if (strcmp(UART_RxPacket, NodeTxBuffer) == 0)
+    {
+        LED1 = 1;   // 报警LED熄灭
+        BEEP = 1;   // 蜂鸣器关闭
+
+        OLED_ShowString(0, 6,
+                        (u8 *)"Cmd:ALARM OFF  ",
+                        16); // OLED屏幕显示：报警关闭
+
+        UART_RxFlag = 0;
+        return;
+    }
+
+    // 所有命令都不匹配，判定为无效指令
+    OLED_ShowString(0, 6,
+                    (u8 *)"Cmd:INVALID    ",
+                    16);
+
+    UART_RxFlag = 0;   // 清除接收标志，等待下一条指令
 }
 
 
@@ -208,35 +281,35 @@ static void App_ProcessGatewayCommand(void)
  */
 void main(void)
 {
-    uchar temperature;
-    uchar humidity;
-    uchar status;
+	uchar temperature;
+	uchar humidity;
+	uchar status;
 
-    OLED_Init();
-    DHT11_Init();
-    UART_Init();
+	OLED_Init();
+	DHT11_Init();
+	UART_Init();
+	Stepper_Init();
+
+	App_ShowStaticText();
+	
+	while (1)
+	{
+			status = DHT11_Read(&temperature, &humidity);
+
+			if (status == DHT11_OK)
+			{
+					App_ShowData(temperature, humidity);
+					Node_SendEnvironmentPacket(temperature, humidity);
+			}
+			else
+			{
+					App_ReportError(status);
+			}
+			
+			/* 处理来自STM32网关下发的命令 */
+			App_ProcessGatewayCommand();
 
 
-    App_ShowStaticText();
-
-    while (1)
-    {
-        status = DHT11_Read(&temperature, &humidity);
-
-        if (status == DHT11_OK)
-        {
-            App_ShowData(temperature, humidity);
-            Node_SendEnvironmentPacket(temperature, humidity);
-        }
-        else
-        {
-            App_ReportError(status);
-        }
-				
-				/* 处理来自STM32网关下发的命令 */
-				App_ProcessGatewayCommand();
-
-
-        Delay_xms(NODE_REPORT_INTERVAL_MS);
-    }
+			Delay_xms(NODE_REPORT_INTERVAL_MS);
+	}
 }
