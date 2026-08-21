@@ -8,6 +8,7 @@
 #include "oled.h"
 #include "uart.h"
 #include <string.h>
+#include "stepper.h"
 
 /* DHT11 reading and node reporting interval. */
 #define NODE_REPORT_INTERVAL_MS 2000U
@@ -208,35 +209,46 @@ static void App_ProcessGatewayCommand(void)
  */
 void main(void)
 {
-    uchar temperature;
-    uchar humidity;
-    uchar status;
+	uchar temperature;
+	uchar humidity;
+	uchar status;
 
-    OLED_Init();
-    DHT11_Init();
-    UART_Init();
+	OLED_Init();
+	DHT11_Init();
+	UART_Init();
+	Stepper_Init();
+
+	App_ShowStaticText();
+	
+	/*
+	 * @brief Perform one basic stepper motor hardware test.
+	 * The motor rotates forward, then reverses, and finally releases its coils.
+	 * @note 28BYJ?48采用半步驱动模式，512个半步对应输出轴旋转完整1圈
+	 * @note Stepper_RotateSteps为阻塞调用，电机运转时CPU在此等待
+	 */
+	Stepper_RotateSteps(512U, STEPPER_DIRECTION_FORWARD);
+	Delay_xms(300U);
+	Stepper_RotateSteps(512U, STEPPER_DIRECTION_REVERSE);
+	Stepper_Stop();
+	
+	while (1)
+	{
+			status = DHT11_Read(&temperature, &humidity);
+
+			if (status == DHT11_OK)
+			{
+					App_ShowData(temperature, humidity);
+					Node_SendEnvironmentPacket(temperature, humidity);
+			}
+			else
+			{
+					App_ReportError(status);
+			}
+			
+			/* 处理来自STM32网关下发的命令 */
+			App_ProcessGatewayCommand();
 
 
-    App_ShowStaticText();
-
-    while (1)
-    {
-        status = DHT11_Read(&temperature, &humidity);
-
-        if (status == DHT11_OK)
-        {
-            App_ShowData(temperature, humidity);
-            Node_SendEnvironmentPacket(temperature, humidity);
-        }
-        else
-        {
-            App_ReportError(status);
-        }
-				
-				/* 处理来自STM32网关下发的命令 */
-				App_ProcessGatewayCommand();
-
-
-        Delay_xms(NODE_REPORT_INTERVAL_MS);
-    }
+			Delay_xms(NODE_REPORT_INTERVAL_MS);
+	}
 }

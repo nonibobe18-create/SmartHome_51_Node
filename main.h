@@ -11,9 +11,11 @@ sbit LED2 = P1^1;
 //sbit LED3 = P1^2;
 sbit LED4 = P1^3;
 sbit BEEP = P1^6;
-sbit JDQ1 = P2^0;
+
+/* P2.0 to P2.3 are reserved for the stepper motor driver. */
+
 sbit SUN = P3^7;
- 
+
 sbit KEY1 = P3^2;
 sbit KEY2 = P3^3;
 
