@@ -16,6 +16,10 @@
 /* UART packet buffer sent to the STM32 gateway. */
 static char NodeTxBuffer[24];
 
+static uchar curtainMotionDirection;
+static uchar openLimitStableCount;
+static uchar closeLimitStableCount;
+
 /*
  * @brief Number of half steps used for one curtain movement.
  * @note 512 half steps is approximately one revolution for 28BYJ?48.
@@ -25,6 +29,10 @@ static char NodeTxBuffer[24];
 #define CURTAIN_TRAVEL_STEPS 512U
 
 #define MAIN_LOOP_INTERVAL_MS 10U
+#define CURTAIN_MOTION_NONE  0U
+#define CURTAIN_MOTION_OPEN  1U
+#define CURTAIN_MOTION_CLOSE 2U
+#define STEPPER_LIMIT_DEBOUNCE_COUNT 3U
 
 /**
  * @brief 为协议载荷计算XOR异或校验和
@@ -140,6 +148,76 @@ static void Node_SendEnvironmentPacket(uchar temperature, uchar humidity)
 }
 
 /**
+ * @brief 处理窗帘开、关限位开关输入信号
+ * @param 无
+ * @retval 无
+ * @note KEY1、KEY2为低电平有效，消抖时间约30ms
+ */
+static void App_ProcessCurtainLimit(void)
+{
+	// ---------- 开限位KEY1消抖计数 ----------
+	if(KEY1 == 0U)
+	{
+		// KEY1检测到低电平，消抖计数器累加
+		if(openLimitStableCount < STEPPER_LIMIT_DEBOUNCE_COUNT)
+		{
+			openLimitStableCount ++;
+    }
+  }
+	else
+	{
+		// KEY1为高电平，限位未触发，清零消抖计数器
+		openLimitStableCount = 0U;
+  }
+	
+	// ---------- 关限位KEY2消抖计数 ----------
+	if(KEY2 == 0U)
+	{
+		if(closeLimitStableCount < STEPPER_LIMIT_DEBOUNCE_COUNT)
+		{
+			closeLimitStableCount ++;
+    }
+  }
+	else
+	{
+		closeLimitStableCount = 0U;
+  }
+	
+	// 步进电机空闲（没有在运动）
+	if(Stepper_IsBusy() == 0U)
+	{
+		curtainMotionDirection = CURTAIN_MOTION_NONE;//运动方向置为无动作
+		return;
+  }
+	
+	// 正在执行【打开窗帘】，且开限位开关消抖完成，触发开限位
+	if((curtainMotionDirection == CURTAIN_MOTION_OPEN) &&
+  		(openLimitStableCount >= STEPPER_LIMIT_DEBOUNCE_COUNT))
+	{
+		Stepper_Stop();                                  //停止步进电机
+		curtainMotionDirection = CURTAIN_MOTION_NONE;    //清除运动方向
+		
+		OLED_ShowString(0,6,
+		                (u8 *)"Cmd:OPEN LIMIT  ",
+		                16);
+		return;
+  }
+	
+	// 正在执行【关闭窗帘】，且关限位开关消抖完成，触发关限位
+	if((curtainMotionDirection == CURTAIN_MOTION_CLOSE) &&
+  		(closeLimitStableCount >= STEPPER_LIMIT_DEBOUNCE_COUNT))
+	{
+		Stepper_Stop();                                  //停止步进电机
+		curtainMotionDirection = CURTAIN_MOTION_NONE;    //清除运动方向
+		
+		OLED_ShowString(0,6,
+		                (u8 *)"Cmd:CLOSE LIMIT ",
+		                16);
+		return;
+  }
+}
+
+/**
  * @brief Process validated alarm and curtain commands from the STM32 gateway.
  * @param None
  * @retval None
@@ -174,22 +252,28 @@ static void App_ProcessGatewayCommand(void)
     // 将收到的串口报文和拼装好的标准报文完整比对
     if (strcmp(UART_RxPacket, NodeTxBuffer) == 0)
     {
-			//判断步进电机是否空闲（不在运动中）
-			if(Stepper_IsBusy() == 0U)
+			if(Stepper_IsBusy() != 0U)
 			{
-				//电机空闲：启动电机，正转窗帘总行程步数，执行【窗帘打开】
-				Stepper_Start(CURTAIN_TRAVEL_STEPS,STEPPER_DIRECTION_FORWARD);
-				
-				//OLED屏幕第0列，第6行，显示字符串：Cmd:CURTAIN OPEN 字体16号
 				OLED_ShowString(0,6,
-				                (u8 *)"Cmd:CURTAIN OPEN",
+				                (u8 *)"Cmd:STEPPER BUZY",
+				                16);
+      }
+			else if((KEY1 == 0U) ||
+				      (openLimitStableCount >= STEPPER_LIMIT_DEBOUNCE_COUNT))
+			{
+				OLED_ShowString(0,6,
+				                (u8 *)"Cmd:OPEN LIMIT  ",
 				                16);
       }
 			else
 			{
-				//电机正在运转，无法接收新命令
+				Stepper_Start(CURTAIN_TRAVEL_STEPS,
+				              STEPPER_DIRECTION_FORWARD);
+				
+				curtainMotionDirection = CURTAIN_MOTION_OPEN;
+				
 				OLED_ShowString(0,6,
-				                (u8 *)"Cmd:STEPPER BUSY",
+				                (u8 *)"Cmd:CURTAIN OPEN",
 				                16);
       }
 
@@ -212,22 +296,30 @@ static void App_ProcessGatewayCommand(void)
 
     if (strcmp(UART_RxPacket, NodeTxBuffer) == 0)
     {
-			// 判断步进电机是否处于空闲状态
-			if(Stepper_IsBusy() == 0U)
+			if (Stepper_IsBusy() != 0U)
 			{
-				//电机空闲：启动步进电机反转，运行窗帘总行程步数，执行窗帘关闭
-				Stepper_Start(CURTAIN_TRAVEL_STEPS,STEPPER_DIRECTION_REVERSE);
-				
-				OLED_ShowString(0,6,
-				                (u8 *)"Cmd:CURTAIN CLS ",
-				                16);
-      }
+					OLED_ShowString(0, 6,
+													(u8 *)"Cmd:STEPPER BUSY",
+													16);
+			}
+			else if ((KEY2 == 0U) ||
+							 (closeLimitStableCount >= STEPPER_LIMIT_DEBOUNCE_COUNT))
+			{
+					OLED_ShowString(0, 6,
+													(u8 *)"Cmd:CLOSE LIMIT ",
+													16);
+			}
 			else
 			{
-				OLED_ShowString(0,6,
-				                (u8 *)"Cmd:STEPPER BUSY",
-				                16);
-      }
+					Stepper_Start(CURTAIN_TRAVEL_STEPS,
+												STEPPER_DIRECTION_REVERSE);
+
+					curtainMotionDirection = CURTAIN_MOTION_CLOSE;
+
+					OLED_ShowString(0, 6,
+													(u8 *)"Cmd:CURTAIN CLS ",
+													16);
+			}
 
 			UART_RxFlag = 0;
 			return;
@@ -248,6 +340,7 @@ static void App_ProcessGatewayCommand(void)
 		if(strcmp(UART_RxPacket,NodeTxBuffer) == 0)
 		{
 			Stepper_Stop();
+			curtainMotionDirection = CURTAIN_MOTION_NONE;
 			
 			OLED_ShowString(0,6,(u8 *)"Cmd:CURTAIN STOP",16);
 			
@@ -334,12 +427,17 @@ void main(void)
 	UART_Init();
 	Stepper_Init();
 
+	curtainMotionDirection = CURTAIN_MOTION_NONE;
+	openLimitStableCount = 0;
+	closeLimitStableCount = 0;
+	
 	App_ShowStaticText();
 	nodeReportElapsedMs = NODE_REPORT_INTERVAL_MS;
 	
 	while (1)
 	{
 		Stepper_Task(); 
+		App_ProcessCurtainLimit();
 		App_ProcessGatewayCommand();               // 应用层：解析处理网关下发的串口协议命令
 		
 		/*
