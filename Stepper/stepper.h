@@ -14,12 +14,26 @@
 void Stepper_Init(void);
 
 /**
- * @brief 控制步进电机转动指定半步数
- * @param steps 需要转动的半步数量；28BYJ?48半步模式完整一圈需要512个半步
- * @param direction 转动方向：STEPPER_DIRECTION_FORWARD正转 / STEPPER_DIRECTION_REVERSE反转
- * @retval None 无返回值
+ * @brief 启动非阻塞式步进电机运动
+ * @param steps 半步步数
+ * @param direction 旋转方向
+ * @retval 无
  */
-void Stepper_RotateSteps(unsigned int steps, unsigned char direction);
+void Stepper_Start(unsigned int steps,unsigned char direction);
+
+/**
+ * @brief 执行一次步进电机控制周期（放在主循环/定时器中调用）
+ * @param 无
+ * @retval 无
+ */
+void Stepper_Task(void);
+ 
+ /**
+ * @brief 判断步进电机是否正在运转
+ * @param 无
+ * @retval 1：正在运动；0：停止
+ */
+unsigned char Stepper_IsBusy(void);
 
 /**
  * @brief 关闭步进电机所有线圈输出

@@ -24,6 +24,8 @@ static char NodeTxBuffer[24];
  */
 #define CURTAIN_TRAVEL_STEPS 512U
 
+#define MAIN_LOOP_INTERVAL_MS 10U
+
 /**
  * @brief 为协议载荷计算XOR异或校验和
  * @param text 去除帧头、帧尾标记之后的协议有效载荷数据字符串
@@ -172,17 +174,27 @@ static void App_ProcessGatewayCommand(void)
     // 将收到的串口报文和拼装好的标准报文完整比对
     if (strcmp(UART_RxPacket, NodeTxBuffer) == 0)
     {
-        // 电机正转，执行窗帘打开动作
-        Stepper_RotateSteps(CURTAIN_TRAVEL_STEPS,
-                            STEPPER_DIRECTION_FORWARD);
-        Stepper_Stop();         // 动作完成，关闭步进电机线圈，释放锁止力矩
+			//判断步进电机是否空闲（不在运动中）
+			if(Stepper_IsBusy() == 0U)
+			{
+				//电机空闲：启动电机，正转窗帘总行程步数，执行【窗帘打开】
+				Stepper_Start(CURTAIN_TRAVEL_STEPS,STEPPER_DIRECTION_FORWARD);
+				
+				//OLED屏幕第0列，第6行，显示字符串：Cmd:CURTAIN OPEN 字体16号
+				OLED_ShowString(0,6,
+				                (u8 *)"Cmd:CURTAIN OPEN",
+				                16);
+      }
+			else
+			{
+				//电机正在运转，无法接收新命令
+				OLED_ShowString(0,6,
+				                (u8 *)"Cmd:STEPPER BUSY",
+				                16);
+      }
 
-        OLED_ShowString(0, 6,
-                        (u8 *)"Cmd:CURTAIN OPEN",
-                        16); // OLED屏幕显示：窗帘打开命令
-
-        UART_RxFlag = 0;        // 清除串口接收标志位
-        return;                 // 命令处理完毕，退出
+			UART_RxFlag = 0;        // 清除串口接收标志位
+			return;                 // 命令处理完毕，退出
     }
 
     /*
@@ -200,19 +212,49 @@ static void App_ProcessGatewayCommand(void)
 
     if (strcmp(UART_RxPacket, NodeTxBuffer) == 0)
     {
-        // 电机反转，执行窗帘关闭动作
-        Stepper_RotateSteps(CURTAIN_TRAVEL_STEPS,
-                            STEPPER_DIRECTION_REVERSE);
-        Stepper_Stop();
+			// 判断步进电机是否处于空闲状态
+			if(Stepper_IsBusy() == 0U)
+			{
+				//电机空闲：启动步进电机反转，运行窗帘总行程步数，执行窗帘关闭
+				Stepper_Start(CURTAIN_TRAVEL_STEPS,STEPPER_DIRECTION_REVERSE);
+				
+				OLED_ShowString(0,6,
+				                (u8 *)"Cmd:CURTAIN CLS ",
+				                16);
+      }
+			else
+			{
+				OLED_ShowString(0,6,
+				                (u8 *)"Cmd:STEPPER BUSY",
+				                16);
+      }
 
-        OLED_ShowString(0, 6,
-                        (u8 *)"Cmd:CURTAIN CLS ",
-                        16); // OLED屏幕显示：窗帘关闭命令
-
-        UART_RxFlag = 0;
-        return;
+			UART_RxFlag = 0;
+			return;
     }
-
+		
+		/**
+		 * @brief 校验并执行窗帘停止命令
+		 * @param 无
+		 * @retval 无
+		 */
+		// 计算"G1,CURTAIN=STOP"这条命令的校验和
+		expectedChecksum = Protocol_CalculateChecksum("G1,CURTAIN=STOP");
+		
+		// 将命令与校验和格式化组装，存入发送缓冲区NodeTxBuffer
+		sprintf(NodeTxBuffer,"G1,CURTAIN=STOP,C=%u",(uint)expectedChecksum);
+		
+		// 判断串口接收的数据包与本地组装的命令帧是否完全一致
+		if(strcmp(UART_RxPacket,NodeTxBuffer) == 0)
+		{
+			Stepper_Stop();
+			
+			OLED_ShowString(0,6,(u8 *)"Cmd:CURTAIN STOP",16);
+			
+			UART_RxFlag = 0;
+			return;
+    }
+		
     /*
      * @brief Validate and execute the alarm ON command.
      * @param None
@@ -284,6 +326,8 @@ void main(void)
 	uchar temperature;
 	uchar humidity;
 	uchar status;
+	
+	unsigned int nodeReportElapsedMs;
 
 	OLED_Init();
 	DHT11_Init();
@@ -291,25 +335,48 @@ void main(void)
 	Stepper_Init();
 
 	App_ShowStaticText();
+	nodeReportElapsedMs = NODE_REPORT_INTERVAL_MS;
 	
 	while (1)
 	{
-			status = DHT11_Read(&temperature, &humidity);
+		Stepper_Task(); 
+		App_ProcessGatewayCommand();               // 应用层：解析处理网关下发的串口协议命令
+		
+		/*
+		 * @brief 仅当步进电机处于空闲状态时，读取并上报DHT11传感器数据
+		 * @param 无
+		 * @retval 无
+		 * @note 避免传感器时序读取和串口发送过程阻塞步进电机任务
+		 */
+		if (Stepper_IsBusy() != 0U)
+		{
+				/*
+				 * 保持上报定时器处于就绪状态
+				 * 电机停止后会立刻读取传感器数据
+				 */
+				nodeReportElapsedMs = NODE_REPORT_INTERVAL_MS;
+		}
+		else if (nodeReportElapsedMs >= NODE_REPORT_INTERVAL_MS)
+		{
+				nodeReportElapsedMs = 0U;       // 重置上报计时
 
-			if (status == DHT11_OK)
-			{
-					App_ShowData(temperature, humidity);
-					Node_SendEnvironmentPacket(temperature, humidity);
-			}
-			else
-			{
-					App_ReportError(status);
-			}
-			
-			/* 处理来自STM32网关下发的命令 */
-			App_ProcessGatewayCommand();
+				status = DHT11_Read(&temperature, &humidity);   // 读取DHT11温湿度
 
+				if (status == DHT11_OK)         // DHT11读取成功
+				{
+						App_ShowData(temperature, humidity);          // OLED显示温湿度
+						Node_SendEnvironmentPacket(temperature, humidity); // 串口向网关上报环境数据包
+				}
+				else                            // DHT11读取失败
+				{
+						App_ReportError(status);    // 上报传感器错误状态
+				}
+		}
+		else
+		{
+				nodeReportElapsedMs += MAIN_LOOP_INTERVAL_MS;    // 未到上报时间，累计计时
+		}
 
-			Delay_xms(NODE_REPORT_INTERVAL_MS);
+		Delay_xms(MAIN_LOOP_INTERVAL_MS);
 	}
 }
